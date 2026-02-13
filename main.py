@@ -38,6 +38,9 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 # مكتبات معالجة العربية
+def fix_text(text):
+    reshaped_text = arabic_reshaper.reshape(text)
+    return reshaped_text
 import arabic_reshaper
 #from bidi.algorithm import get_display
 
