@@ -1,0 +1,11 @@
+customtkinter
+matplotlib
+numpy
+arabic-reshaper
+python-bidi
+scikit-learn
+reportlab
+mplcursors
+wordcloud
+camel-tools
+transformers>=3.5.0
