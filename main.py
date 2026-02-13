@@ -562,7 +562,7 @@ class AnisLinguisticRadar(ctk.CTk):
         self.setup_compare_tab()
 
         # شريط الحالة
-        self.status_bar = ctk.CTkLabel(self, textvariable=self.status_text,
+        #self.status_bar = ctk.CTkLabel(self, textvariable=self.status_text,
                                         anchor="w", font=("Arial", 12),
                                         fg_color="#1f2937", text_color="white")
         self.status_bar.pack(side="bottom", fill="x", padx=10, pady=2)
