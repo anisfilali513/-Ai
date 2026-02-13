@@ -39,7 +39,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 
 # مكتبات معالجة العربية
 import arabic_reshaper
-from bidi.algorithm import get_display
+#from bidi.algorithm import get_display
 
 # مكتبة سحابة الكلمات (اختيارية)
 try:
