@@ -2,30 +2,87 @@
 # -*- coding: utf-8 -*-
 
 """
-Anis Linguistic Radar - Web Version (النسخة النهائية)
-Flask-based web application for Arabic text analysis
+Anis Linguistic Radar - الإصدار النهائي المتكامل
+Flask-based web application for advanced Arabic text analysis
 جميع الحقوق محفوظة للمطور أنيس فيلالي
 """
 
-from flask import Flask, render_template, request, jsonify
-import matplotlib
-matplotlib.use('Agg')  # استخدام الخلفية غير التفاعلية (للسيرفر)
-import matplotlib.pyplot as plt
-import matplotlib.font_manager as fm
-import numpy as np
+# ====================== الاستيرادات الأساسية ======================
 import os
-import csv
+import sys
+import json
+import time
+import uuid
 import hashlib
 import logging
-import uuid
+from datetime import datetime, timedelta
+from functools import wraps
 from collections import Counter, OrderedDict
-from datetime import datetime
-import arabic_reshaper
-from bidi.algorithm import get_display
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+from typing import Dict, List, Tuple, Optional, Any
 
-# محاولة استيراد wordcloud (اختياري)
+# Flask及相关扩展
+try:
+    from flask import Flask, render_template, request, jsonify, url_for, session, redirect, flash
+    from flask_sqlalchemy import SQLAlchemy
+    from flask_migrate import Migrate
+    from flask_caching import Cache
+    from flask_limiter import Limiter
+    from flask_limiter.util import get_remote_address
+    from flask_cors import CORS
+    from werkzeug.security import generate_password_hash, check_password_hash
+    import jwt
+except ImportError as e:
+    print(f"❌ مكتبة Flask غير مكتملة: {e}")
+    print("قم بتثبيت المتطلبات: pip install flask flask-sqlalchemy flask-migrate flask-caching flask-limiter flask-cors pyjwt")
+    sys.exit(1)
+
+# مكتبات علمية وتحليلية
+try:
+    import numpy as np
+except ImportError:
+    print("❌ numpy غير مثبت. قم بتثبيته عبر: pip install numpy")
+    sys.exit(1)
+
+try:
+    import matplotlib
+    matplotlib.use('Agg')  # وضع غير تفاعلي
+    import matplotlib.pyplot as plt
+    import matplotlib.font_manager as fm
+except ImportError:
+    print("❌ matplotlib غير مثبت. قم بتثبيته عبر: pip install matplotlib")
+    sys.exit(1)
+
+# مكتبات اللغة العربية المتقدمة (اختياري)
+ARABIC_LINGUISTICS_AVAILABLE = False
+try:
+    import arabic_reshaper
+    from bidi.algorithm import get_display
+    ARABIC_SHAPING_AVAILABLE = True
+except ImportError:
+    ARABIC_SHAPING_AVAILABLE = False
+    arabic_reshaper = None
+    get_display = None
+
+try:
+    from camel_tools.sentiment import SentimentAnalyzer
+    from camel_tools.morphology.database import MorphologyDB
+    from camel_tools.morphology.analyzer import Analyzer
+    CAMEL_AVAILABLE = True
+except ImportError:
+    CAMEL_AVAILABLE = False
+    SentimentAnalyzer = None
+    MorphologyDB = None
+    Analyzer = None
+
+try:
+    from farasa.segmenter import FarasaSegmenter
+    from farasa.pos import FarasaPOS
+    FARASA_AVAILABLE = True
+except ImportError:
+    FARASA_AVAILABLE = False
+    FarasaSegmenter = None
+    FarasaPOS = None
+
 try:
     from wordcloud import WordCloud
     WORDCLOUD_AVAILABLE = True
@@ -33,63 +90,166 @@ except ImportError:
     WORDCLOUD_AVAILABLE = False
     WordCloud = None
 
-# محاولة استيراد camel-tools (اختياري)
 try:
-    from camel_tools.sentiment import SentimentAnalyzer
-    CAMEL_AVAILABLE = True
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+    SKLEARN_AVAILABLE = True
 except ImportError:
-    CAMEL_AVAILABLE = False
-    SentimentAnalyzer = None
+    SKLEARN_AVAILABLE = False
+    TfidfVectorizer = None
+    cosine_similarity = None
 
-# ---------------------------- الإعدادات الثابتة ----------------------------
+# تخزين سحابي (اختياري)
+try:
+    import boto3
+    from botocore.exceptions import NoCredentialsError
+    S3_AVAILABLE = True
+except ImportError:
+    S3_AVAILABLE = False
+    boto3 = None
+
+# Redis (اختياري)
+try:
+    import redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
+    redis = None
+
+# متغيرات البيئة
+from dotenv import load_dotenv
+load_dotenv()
+
+# ====================== إعدادات التطبيق ======================
+class Config:
+    SECRET_KEY = os.environ.get('SECRET_KEY', os.urandom(24).hex())
+    JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY', SECRET_KEY)
+    JWT_ACCESS_TOKEN_EXPIRES = int(os.environ.get('JWT_ACCESS_TOKEN_EXPIRES', 3600))  # ساعة
+
+    # قاعدة البيانات
+    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL', 'sqlite:///anis_radar.db')
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        'pool_size': int(os.environ.get('DB_POOL_SIZE', 10)),
+        'pool_recycle': int(os.environ.get('DB_POOL_RECYCLE', 3600)),
+    }
+
+    # Redis للتخزين المؤقت ومعدل الطلبات
+    REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
+    if REDIS_AVAILABLE and REDIS_URL:
+        CACHE_TYPE = 'RedisCache'
+        CACHE_REDIS_URL = REDIS_URL
+        CACHE_DEFAULT_TIMEOUT = 300
+        RATELIMIT_STORAGE_URL = REDIS_URL
+    else:
+        CACHE_TYPE = 'SimpleCache'
+        CACHE_DEFAULT_TIMEOUT = 300
+        RATELIMIT_STORAGE_URL = 'memory://'
+
+    RATELIMIT_ENABLED = os.environ.get('RATELIMIT_ENABLED', 'True').lower() == 'true'
+    RATELIMIT_DEFAULT = os.environ.get('RATELIMIT_DEFAULT', '100 per day, 10 per minute')
+
+    # حدود المحتوى
+    MAX_CONTENT_LENGTH = int(os.environ.get('MAX_CONTENT_LENGTH', 16 * 1024 * 1024))  # 16 MB
+    MIN_TEXT_LENGTH = 10
+    MAX_TEXT_LENGTH = 20000
+
+    # مسار الخط العربي
+    FONT_PATH = os.environ.get('FONT_PATH', 'Amiri-Regular.ttf')
+
+    # تخزين الصور (محلي أو S3)
+    UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER', 'static/images')
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+    USE_S3 = os.environ.get('USE_S3', 'False').lower() == 'true'
+    if USE_S3 and S3_AVAILABLE:
+        S3_BUCKET = os.environ.get('S3_BUCKET')
+        S3_KEY = os.environ.get('S3_KEY')
+        S3_SECRET = os.environ.get('S3_SECRET')
+        S3_REGION = os.environ.get('S3_REGION', 'us-east-1')
+        S3_PUBLIC_URL = os.environ.get('S3_PUBLIC_URL', f'https://{S3_BUCKET}.s3.amazonaws.com/')
+
+# ====================== تهيئة التطبيق والامتدادات ======================
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'anis-secret-key-change-in-production'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB حد للملفات
+app.config.from_object(Config)
+
+# قاعدة البيانات
+db = SQLAlchemy(app)
+migrate = Migrate(app, db)
+
+# التخزين المؤقت
+cache = Cache(app)
+
+# الحد من معدل الطلبات
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    storage_uri=app.config['RATELIMIT_STORAGE_URL'],
+    enabled=app.config['RATELIMIT_ENABLED']
+)
+
+# CORS للواجهة الأمامية (إذا كانت منفصلة)
+CORS(app)
 
 # إعداد التسجيل
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO if not app.debug else logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
-# المسارات
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-STATIC_IMAGES_DIR = os.path.join(BASE_DIR, 'static', 'images')
-HISTORY_FILE = os.path.join(BASE_DIR, 'history.csv')
-FONT_PATH = os.path.join(BASE_DIR, 'Amiri-Regular.ttf')
+# ====================== نماذج قاعدة البيانات ======================
+class User(db.Model):
+    __tablename__ = 'users'
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    password_hash = db.Column(db.String(128), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    is_active = db.Column(db.Boolean, default=True)
+    analyses = db.relationship('Analysis', backref='user', lazy='dynamic')
 
-# إنشاء مجلد الصور إذا لم يكن موجودًا
-os.makedirs(STATIC_IMAGES_DIR, exist_ok=True)
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
 
-# إعداد الخط العربي لمخططات matplotlib
-font_prop = None
-if os.path.exists(FONT_PATH):
-    try:
-        font_prop = fm.FontProperties(fname=FONT_PATH)
-        logging.info("✅ تم تحميل الخط العربي لمخططات Matplotlib")
-    except Exception as e:
-        logging.warning(f"⚠️ فشل تحميل الخط لمخططات Matplotlib: {e}")
-else:
-    logging.warning("⚠️ خط Amiri غير موجود. قد لا تظهر العربية بشكل صحيح في المخططات.")
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
 
-# ثوابت التحليل
-MIN_TEXT_LENGTH = 10
-MAX_TEXT_LENGTH = 20000
-RADAR_CATEGORIES = [
-    "الإنتروبيا",
-    "التوازن الصوتي",
-    "الجهر",
-    "الهمس",
-    "طول الكلمة",
-    "ثراء المفردات"
-]
+    def generate_token(self, expires_in=None):
+        if expires_in is None:
+            expires_in = app.config['JWT_ACCESS_TOKEN_EXPIRES']
+        payload = {
+            'user_id': self.id,
+            'username': self.username,
+            'exp': datetime.utcnow() + timedelta(seconds=expires_in)
+        }
+        return jwt.encode(payload, app.config['JWT_SECRET_KEY'], algorithm='HS256')
 
-# مجموعات الحروف العربية
-VOICED = set("بجتدذرزضظعغقلمنوي")
-VOICELESS = set("حثسصشفكهت")
-PUNCTUATIONS = set(".,;:!?؟،؛")
+    @staticmethod
+    def verify_token(token):
+        try:
+            payload = jwt.decode(token, app.config['JWT_SECRET_KEY'], algorithms=['HS256'])
+            return User.query.get(payload['user_id'])
+        except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+            return None
 
-# ---------------------------- دوال مساعدة للعربية ----------------------------
+class Analysis(db.Model):
+    __tablename__ = 'analyses'
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    text_preview = db.Column(db.String(200))
+    text_hash = db.Column(db.String(64), unique=True, index=True)
+    sentiment = db.Column(db.String(20))
+    confidence = db.Column(db.Float)
+    emotions = db.Column(db.JSON)          # تخزين كـ JSON
+    stats = db.Column(db.JSON)              # الإحصائيات الأساسية
+    advanced_stats = db.Column(db.JSON)     # إحصائيات متقدمة (مثل TTR, hapax)
+    linguistic_features = db.Column(db.JSON)  # الميزات اللغوية المتقدمة
+    keywords = db.Column(db.JSON)
+    plot_urls = db.Column(db.JSON)          # روابط الصور (إذا خُزنت خارجياً)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+
+# ====================== دوال مساعدة للعربية والرسوم ======================
 def reshape_arabic(text):
-    """إعادة تشكيل النص العربي للعرض بشكل صحيح"""
-    if not text:
+    if not text or not ARABIC_SHAPING_AVAILABLE:
         return text
     try:
         reshaped = arabic_reshaper.reshape(text)
@@ -98,39 +258,28 @@ def reshape_arabic(text):
         logging.error(f"خطأ في reshape: {e}")
         return text
 
-# ---------------------------- مدير التخزين المؤقت (Cache) ----------------------------
-class AnalysisCache:
-    """تخزين مؤقت لنتائج التحليل باستخدام hash النص كمفتاح"""
-    def __init__(self, max_size=50):
-        self.cache = OrderedDict()
-        self.max_size = max_size
+# إعداد الخط
+font_prop = None
+if os.path.exists(app.config['FONT_PATH']):
+    try:
+        font_prop = fm.FontProperties(fname=app.config['FONT_PATH'])
+        logging.info("✅ تم تحميل الخط العربي")
+    except Exception as e:
+        logging.warning(f"⚠️ فشل تحميل الخط: {e}")
+else:
+    logging.warning("⚠️ خط Amiri غير موجود.")
 
-    def _hash(self, text):
-        return hashlib.sha256(text.encode('utf-8')).hexdigest()
+# مجموعات الحروف
+VOICED = set("بجتدذرزضظعغقلمنوي")
+VOICELESS = set("حثسصشفكهت")
+PUNCTUATIONS = set(".,;:!?؟،؛")
+RADAR_CATEGORIES = ["الإنتروبيا", "التوازن الصوتي", "الجهر", "الهمس", "طول الكلمة", "ثراء المفردات"]
 
-    def get(self, text):
-        key = self._hash(text)
-        if key in self.cache:
-            self.cache.move_to_end(key)
-            logging.info("✅ تم استرجاع النتائج من الكاش")
-            return self.cache[key]
-        return None
-
-    def put(self, text, result):
-        key = self._hash(text)
-        if key in self.cache:
-            self.cache.move_to_end(key)
-        else:
-            if len(self.cache) >= self.max_size:
-                self.cache.popitem(last=False)
-            self.cache[key] = result
-        logging.info("📦 تم تخزين النتائج في الكاش")
-
-cache = AnalysisCache()
-
-# ---------------------------- مستخرج الخصائص الإحصائية ----------------------------
+# ====================== خدمات التحليل المتقدمة ======================
 class FeatureExtractor:
-    def extract(self, text):
+    @staticmethod
+    def extract(text):
+        """استخراج الإحصائيات الأساسية"""
         if not text or len(text.strip()) == 0:
             return [0.0] * 8
 
@@ -138,11 +287,14 @@ class FeatureExtractor:
         total_words = len(words)
         total_chars = len(text)
 
-        # 1. الإنتروبيا
+        # الإنتروبيا
         char_counts = Counter(text)
-        entropy = -sum((count/total_chars) * np.log2(count/total_chars) for count in char_counts.values()) if total_chars else 0
+        if total_chars > 0:
+            entropy = -sum((c/total_chars) * np.log2(c/total_chars) for c in char_counts.values() if c > 0)
+        else:
+            entropy = 0.0
 
-        # 2. التوازن الصوتي
+        # التوازن الصوتي
         voiced = sum(1 for c in text if c in VOICED)
         voiceless = sum(1 for c in text if c in VOICELESS)
         total_phonemes = voiced + voiceless
@@ -154,18 +306,11 @@ class FeatureExtractor:
             voiced_pct = voiceless_pct = 50.0
             balance = 1.0
 
-        # 3. متوسط طول الكلمة
         avg_word = np.mean([len(w) for w in words]) if words else 0.0
-
-        # 4. متوسط طول الجملة
         sentences = [s.strip() for s in text.replace('!', '.').replace('؟', '.').replace('،', '.').split('.') if s.strip()]
         avg_sentence = total_words / len(sentences) if sentences else total_words
-
-        # 5. ثراء المفردات
         unique_words = len(set(words))
         richness = unique_words / total_words if total_words else 0.0
-
-        # 6. نسبة علامات الترقيم
         punct_count = sum(1 for c in text if c in PUNCTUATIONS)
         punct_ratio = punct_count / total_chars if total_chars else 0.0
 
@@ -180,57 +325,139 @@ class FeatureExtractor:
             richness * 100
         ]
 
-    def advanced_stylometry(self, text):
+    @staticmethod
+    def advanced_stylometry(text):
         words = text.split()
         total = len(words)
         unique = len(set(words))
         ttr = unique / total if total else 0.0
-
         freq = Counter(words)
         hapax = sum(1 for w in freq if freq[w] == 1)
         hapax_ratio = hapax / total if total else 0.0
-
         content_words = [w for w in words if len(w) > 3]
         lexical_density = len(content_words) / total if total else 0.0
-
         return ttr, hapax_ratio, lexical_density
 
-feature_extractor = FeatureExtractor()
-
-# ---------------------------- محلل المشاعر ----------------------------
-class DeepSentimentAnalyzer:
+class AdvancedLinguisticAnalyzer:
     def __init__(self):
-        self.analyzer = None
-        if CAMEL_AVAILABLE:
+        self.camel_analyzer = None
+        self.farasa_segmenter = None
+        self.farasa_pos = None
+
+        if CAMEL_AVAILABLE and MorphologyDB and Analyzer:
             try:
-                self.analyzer = SentimentAnalyzer.pretrained()
-                logging.info("✅ تم تحميل نموذج المشاعر من camel-tools")
+                db = MorphologyDB.builtin_db()
+                self.camel_analyzer = Analyzer(db)
+                logging.info("✅ camel-tools للتحليل الصرفي جاهز")
             except Exception as e:
-                logging.warning(f"⚠️ فشل تحميل نموذج camel-tools: {e}")
-        else:
-            logging.info("⚠️ camel-tools غير مثبت، سيتم استخدام المحلل البسيط")
+                logging.error(f"فشل تحميل camel-tools: {e}")
+
+        if FARASA_AVAILABLE and FarasaSegmenter and FarasaPOS:
+            try:
+                self.farasa_segmenter = FarasaSegmenter(interactive=True)
+                self.farasa_pos = FarasaPOS(interactive=True)
+                logging.info("✅ Farasa للتحليل النحوي جاهز")
+            except Exception as e:
+                logging.error(f"فشل تحميل Farasa: {e}")
+
+    def analyze_morphology(self, text: str, max_words: int = 50) -> List[Dict]:
+        """تحليل صرفي: جذر، وزن، نوع"""
+        if self.camel_analyzer:
+            try:
+                words = text.split()[:max_words]
+                results = []
+                for word in words:
+                    analyses = self.camel_analyzer.analyze(word)
+                    if analyses:
+                        first = analyses[0]
+                        results.append({
+                            'word': word,
+                            'root': first.get('root', ''),
+                            'pattern': first.get('pattern', ''),
+                            'pos': first.get('pos', ''),
+                            'gender': first.get('gen', ''),
+                            'number': first.get('num', '')
+                        })
+                    else:
+                        results.append({'word': word, 'root': '', 'pattern': '', 'pos': ''})
+                return results
+            except Exception as e:
+                logging.error(f"خطأ في التحليل الصرفي: {e}")
+        # محلل بديل بسيط
+        return [{'word': w, 'root': w[:3], 'pattern': 'فعل', 'pos': 'اسم'} for w in text.split()[:10]]
+
+    def analyze_syntax(self, text: str) -> Dict:
+        """تحليل نحوي: تقطيع الجمل وأجزاء الكلام"""
+        if self.farasa_pos and self.farasa_segmenter:
+            try:
+                sentences = [s.strip() for s in text.replace('؟', '.').replace('!', '.').split('.') if s.strip()]
+                syntax_data = []
+                for sent in sentences[:5]:  # حد أقصى 5 جمل
+                    if sent:
+                        tokens = self.farasa_segmenter.segment(sent)
+                        pos_tags = self.farasa_pos.tag(sent)
+                        syntax_data.append({
+                            'sentence': sent,
+                            'tokens': tokens,
+                            'pos_tags': pos_tags
+                        })
+                return {'sentences': syntax_data}
+            except Exception as e:
+                logging.error(f"خطأ في التحليل النحوي: {e}")
+        return {'sentences': []}
+
+    def analyze_phonetics(self, text: str) -> Dict:
+        """تحليل صوتي إضافي (نسب الحروف حسب المخارج)"""
+        # قوائم مبسطة للمخارج
+        makharij = {
+            'حلقية': set('أهعحغخ'),
+            'لهوية': set('قك'),
+            'شجرية': set('جشض'),
+            'لثوية': set('صسز'),
+            'نطعية': set('طدت'),
+            'ذلقية': set('لرنبفم')
+        }
+        total_chars = len([c for c in text if c.strip()])
+        if total_chars == 0:
+            return {}
+        result = {}
+        for name, letters in makharij.items():
+            count = sum(1 for c in text if c in letters)
+            result[name] = round(count / total_chars * 100, 1)
+        return result
+
+feature_extractor = FeatureExtractor()
+linguistic_analyzer = AdvancedLinguisticAnalyzer()
+
+# محلل المشاعر
+class SentimentAnalyzerModule:
+    def __init__(self):
+        self.advanced = None
+        if CAMEL_AVAILABLE and SentimentAnalyzer:
+            try:
+                self.advanced = SentimentAnalyzer.pretrained()
+                logging.info("✅ نموذج المشاعر المتقدم جاهز")
+            except Exception as e:
+                logging.warning(f"⚠️ فشل تحميل النموذج المتقدم: {e}")
 
     def analyze(self, text):
-        if self.analyzer is not None:
+        if self.advanced:
             try:
-                result = self.analyzer.predict([text[:512]])[0]
-                confidence = 0.85  # تقديري
+                result = self.advanced.predict([text[:512]])[0]
                 emotions = self._extract_emotions(text)
-                return result, confidence, emotions
+                return result, 0.85, emotions
             except Exception as e:
-                logging.error(f"خطأ في التحليل العميق: {e}")
+                logging.error(f"خطأ في التحليل المتقدم: {e}")
 
-        # المحلل البسيط
+        # محلل بسيط
         pos_words = {'حب', 'سعيد', 'فرح', 'جميل', 'رائع', 'ممتاز', 'يبتسم', 'أمل', 'تفاؤل', 'نور',
                      'بهجة', 'سرور', 'لطيف', 'عظيم', 'مبدع', 'ناجح', 'مشرق'}
         neg_words = {'حزن', 'بكاء', 'ألم', 'كئيب', 'مؤلم', 'سيء', 'قبيح', 'ظلام', 'خوف', 'فزع',
                      'صعب', 'عسير', 'مزعج', 'غضب', 'كراهية', 'حقد', 'ضيق', 'هم', 'كارثة'}
-
         words = text.split()
         pos_count = sum(1 for w in words if w in pos_words)
         neg_count = sum(1 for w in words if w in neg_words)
         total = pos_count + neg_count
-
         if total == 0:
             return "محايد", 0.5, {}
         pos_ratio = pos_count / total
@@ -266,13 +493,29 @@ class DeepSentimentAnalyzer:
                 emotions['خوف'] += 1
         return emotions
 
-sentiment_analyzer = DeepSentimentAnalyzer()
+sentiment_analyzer = SentimentAnalyzerModule()
 
-# ---------------------------- دوال إنشاء الرسوم البيانية ----------------------------
+# ====================== دوال إنشاء الرسوم البيانية (مع دعم S3) ======================
+def upload_to_s3(file_path, object_name=None):
+    """رفع ملف إلى S3 وإرجاع الرابط العام"""
+    if not app.config['USE_S3'] or not S3_AVAILABLE:
+        return None
+    if object_name is None:
+        object_name = os.path.basename(file_path)
+    try:
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=app.config['S3_KEY'],
+            aws_secret_access_key=app.config['S3_SECRET'],
+            region_name=app.config['S3_REGION']
+        )
+        s3_client.upload_file(file_path, app.config['S3_BUCKET'], object_name, ExtraArgs={'ACL': 'public-read'})
+        return f"{app.config['S3_PUBLIC_URL']}{object_name}"
+    except Exception as e:
+        logging.error(f"فشل رفع الملف إلى S3: {e}")
+        return None
+
 def create_radar_chart(stats, filename, dark_mode=True):
-    """إنشاء مخطط الرادار وحفظه في الملف المحدد"""
-    bg = "#0B0F19" if dark_mode else "#f0f0f0"
-    text_color = "#F7FAFC" if dark_mode else "#333333"
     try:
         values = [
             stats[0] * 10,
@@ -286,19 +529,23 @@ def create_radar_chart(stats, filename, dark_mode=True):
         angles = np.linspace(0, 2*np.pi, len(RADAR_CATEGORIES), endpoint=False).tolist()
         angles += angles[:1]
 
-        cat_reshaped = [reshape_arabic(cat) for cat in RADAR_CATEGORIES]
+        bg = "#0B0F19" if dark_mode else "#f0f0f0"
+        text_color = "#F7FAFC" if dark_mode else "#333333"
 
-        fig = plt.figure(figsize=(6, 5), dpi=80, facecolor=bg)
+        fig = plt.figure(figsize=(6,5), dpi=80, facecolor=bg)
         ax = fig.add_subplot(111, polar=True)
         ax.set_facecolor("#1a1f2e" if dark_mode else "#e0e0e0")
         ax.plot(angles, values, color="#D4AF37", linewidth=3, marker='o')
         ax.fill(angles, values, color="#D4AF37", alpha=0.3)
         ax.set_yticklabels([])
         ax.set_xticks(angles[:-1])
+
+        categories_reshaped = [reshape_arabic(cat) for cat in RADAR_CATEGORIES]
         if font_prop:
-            ax.set_xticklabels(cat_reshaped, fontproperties=font_prop, color=text_color, size=10)
+            ax.set_xticklabels(categories_reshaped, fontproperties=font_prop, color=text_color, size=10)
         else:
-            ax.set_xticklabels(cat_reshaped, color=text_color, size=10)
+            ax.set_xticklabels(categories_reshaped, color=text_color, size=10)
+
         fig.savefig(filename, bbox_inches='tight', facecolor=bg)
         plt.close(fig)
         return True
@@ -307,15 +554,17 @@ def create_radar_chart(stats, filename, dark_mode=True):
         return False
 
 def create_bar_chart(text, filename, dark_mode=True):
-    """مخطط توزيع أطوال الكلمات"""
-    bg = "#0B0F19" if dark_mode else "#f0f0f0"
-    text_color = "#F7FAFC" if dark_mode else "#333333"
     try:
         words = text.split()
         word_lengths = [len(w) for w in words if w]
+        if not word_lengths:
+            word_lengths = [0]
         bins = range(1, 12)
         hist, _ = np.histogram(word_lengths, bins=bins)
         labels = [f"{i}-{i+1}" for i in range(1, 11)]
+
+        bg = "#0B0F19" if dark_mode else "#f0f0f0"
+        text_color = "#F7FAFC" if dark_mode else "#333333"
 
         fig = plt.figure(figsize=(6,5), dpi=80, facecolor=bg)
         ax = fig.add_subplot(111)
@@ -330,10 +579,6 @@ def create_bar_chart(text, filename, dark_mode=True):
             ax.set_xlabel(xlabel, fontproperties=font_prop, color=text_color)
             ax.set_ylabel(ylabel, fontproperties=font_prop, color=text_color)
             ax.set_title(title, fontproperties=font_prop, color="#D4AF37")
-            for label in ax.get_xticklabels():
-                label.set_fontproperties(font_prop)
-            for label in ax.get_yticklabels():
-                label.set_fontproperties(font_prop)
         else:
             ax.set_xlabel(xlabel, color=text_color)
             ax.set_ylabel(ylabel, color=text_color)
@@ -350,32 +595,25 @@ def create_bar_chart(text, filename, dark_mode=True):
         return False
 
 def create_wordcloud(text, filename, dark_mode=True):
-    """إنشاء سحابة الكلمات"""
     bg = "#0B0F19" if dark_mode else "#f0f0f0"
     if not WORDCLOUD_AVAILABLE:
-        # إنشاء صورة خطأ بدلاً من إرجاع خطأ
         fig = plt.figure(figsize=(6,5), facecolor=bg)
         ax = fig.add_subplot(111)
-        ax.text(0.5,0.5, "مكتبة wordcloud غير مثبتة", color='red', ha='center')
+        ax.text(0.5, 0.5, "مكتبة wordcloud غير مثبتة", color='red', ha='center', va='center')
+        ax.axis("off")
         fig.savefig(filename, bbox_inches='tight', facecolor=bg)
         plt.close(fig)
         return True
 
     try:
         reshaped = reshape_arabic(text)
-        # بعض المعالجة الإضافية للعربية في wordcloud
-        if any('\u0600' <= c <= '\u06FF' for c in reshaped):
-            processed = reshaped[::-1]  # قد تحتاج لتعديل حسب اتجاه النص
-        else:
-            processed = reshaped
-
         wc = WordCloud(
             width=500, height=400,
             background_color='#0D1117' if dark_mode else '#f0f0f0',
-            font_path=FONT_PATH if os.path.exists(FONT_PATH) else None,
+            font_path=app.config['FONT_PATH'] if os.path.exists(app.config['FONT_PATH']) else None,
             colormap='viridis',
             random_state=42
-        ).generate(processed)
+        ).generate(reshaped)
 
         fig = plt.figure(figsize=(6,5), dpi=80, facecolor=bg)
         ax = fig.add_subplot(111)
@@ -393,111 +631,140 @@ def create_wordcloud(text, filename, dark_mode=True):
         logging.error(f"فشل إنشاء سحابة الكلمات: {e}")
         fig = plt.figure(figsize=(6,5), facecolor=bg)
         ax = fig.add_subplot(111)
-        ax.text(0.5,0.5, f"خطأ: {e}", color='red', ha='center')
+        ax.text(0.5,0.5, f"خطأ: {e}", color='red', ha='center', va='center')
+        ax.axis("off")
         fig.savefig(filename, bbox_inches='tight', facecolor=bg)
         plt.close(fig)
         return True
 
-# ---------------------------- دوال CSV ----------------------------
-def log_to_csv(text, sentiment, stats):
-    """تسجيل عملية تحليل في ملف CSV"""
+# ====================== دوال استخراج الكلمات المفتاحية ======================
+def extract_keywords(text, n=5):
+    if not SKLEARN_AVAILABLE or TfidfVectorizer is None:
+        return ["غير متاح"]
     try:
-        file_exists = os.path.isfile(HISTORY_FILE)
-        with open(HISTORY_FILE, 'a', newline='', encoding='utf-8-sig') as f:
-            writer = csv.writer(f)
-            if not file_exists:
-                writer.writerow(['النص (مختصر)', 'المشاعر', 'الإنتروبيا', 'التاريخ'])
-            writer.writerow([
-                text[:50] + "...",
-                sentiment,
-                f"{stats[0]:.2f}",
-                datetime.now().strftime("%Y-%m-%d %H:%M")
-            ])
+        vectorizer = TfidfVectorizer(max_features=n)
+        sentences = text.split('.') if '.' in text else [text]
+        tfidf = vectorizer.fit_transform(sentences)
+        return vectorizer.get_feature_names_out().tolist()
     except Exception as e:
-        logging.error(f"خطأ في تسجيل البيانات: {e}")
+        logging.warning(f"فشل استخراج الكلمات المفتاحية: {e}")
+        return ["غير متاح"]
 
-def read_history(limit=50):
-    """قراءة آخر limit سجل من ملف CSV"""
-    if not os.path.exists(HISTORY_FILE):
-        return []
-    try:
-        with open(HISTORY_FILE, 'r', encoding='utf-8-sig') as f:
-            reader = csv.reader(f)
-            rows = list(reader)
-        if len(rows) <= 1:
-            return []
-        # نريد آخر limit صف (بدون العنوان)
-        return rows[1:][-limit:]
-    except Exception as e:
-        logging.error(f"خطأ في قراءة السجل: {e}")
-        return []
+# ====================== نظام الكاش (Redis) ======================
+class AnalysisCache:
+    def __init__(self, cache_obj):
+        self.cache = cache_obj
 
-# ---------------------------- نقاط نهاية Flask ----------------------------
+    def get(self, text):
+        key = hashlib.sha256(text.encode('utf-8')).hexdigest()
+        return self.cache.get(key)
+
+    def set(self, text, value, timeout=300):
+        key = hashlib.sha256(text.encode('utf-8')).hexdigest()
+        self.cache.set(key, value, timeout=timeout)
+
+analysis_cache = AnalysisCache(cache)
+
+# ====================== مصادقة JWT ======================
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = request.headers.get('Authorization')
+        if not token or not token.startswith('Bearer '):
+            return jsonify({'error': 'Token missing or invalid'}), 401
+        token = token[7:]
+        user = User.verify_token(token)
+        if not user:
+            return jsonify({'error': 'Invalid or expired token'}), 401
+        return f(user=user, *args, **kwargs)
+    return decorated
+
+# ====================== نقاط النهاية ======================
 
 @app.route('/')
 def index():
-    """الصفحة الرئيسية"""
     return render_template('index.html')
 
-@app.route('/analyze', methods=['POST'])
-def analyze():
-    """تحليل النص المرسل"""
+@app.route('/history')
+def history_page():
+    return render_template('history.html')
+
+@app.route('/compare')
+def compare_page():
+    return render_template('compare.html')
+
+# واجهة برمجة التطبيقات (API)
+
+@app.route('/api/analyze', methods=['POST'])
+@limiter.limit("10 per minute")
+def api_analyze():
     data = request.get_json()
     if not data or 'text' not in data:
         return jsonify({'error': 'لا يوجد نص'}), 400
 
     text = data['text'].strip()
-    if len(text) < MIN_TEXT_LENGTH:
-        return jsonify({'error': f'النص قصير جداً (الحد الأدنى {MIN_TEXT_LENGTH} حرف)'}), 400
-    if len(text) > MAX_TEXT_LENGTH:
-        text = text[:MAX_TEXT_LENGTH]  # اقتطاع
+    if len(text) < app.config['MIN_TEXT_LENGTH']:
+        return jsonify({'error': f'النص قصير جداً (الحد الأدنى {app.config["MIN_TEXT_LENGTH"]} حرف)'}), 400
+    if len(text) > app.config['MAX_TEXT_LENGTH']:
+        text = text[:app.config['MAX_TEXT_LENGTH']]
 
-    # التحقق من الكاش
-    cached = cache.get(text)
+    # البحث في الكاش
+    cached = analysis_cache.get(text)
     if cached:
-        stats, sentiment, confidence, emotions = cached
-        from_cache = True
-    else:
-        stats = feature_extractor.extract(text)
-        sentiment, confidence, emotions = sentiment_analyzer.analyze(text)
-        cache.put(text, (stats, sentiment, confidence, emotions))
-        from_cache = False
+        return jsonify({'success': True, 'from_cache': True, 'data': cached})
 
-    # إنشاء أسماء ملفات فريدة للرسوم البيانية
-    plot_id = str(uuid.uuid4())
-    radar_filename = os.path.join(STATIC_IMAGES_DIR, f'radar_{plot_id}.png')
-    bar_filename = os.path.join(STATIC_IMAGES_DIR, f'bar_{plot_id}.png')
-    wc_filename = os.path.join(STATIC_IMAGES_DIR, f'wc_{plot_id}.png')
-
-    # إنشاء الرسوم
-    dark_mode = data.get('dark_mode', True)  # يمكن تمريرها من الواجهة
-    radar_ok = create_radar_chart(stats, radar_filename, dark_mode)
-    bar_ok = create_bar_chart(text, bar_filename, dark_mode)
-    wc_ok = create_wordcloud(text, wc_filename, dark_mode)
-
-    # استخراج الكلمات المفتاحية
-    try:
-        vectorizer = TfidfVectorizer(max_features=5)
-        sentences = text.split('.')
-        if len(sentences) < 2:
-            sentences = [text]
-        tfidf = vectorizer.fit_transform(sentences)
-        keywords = vectorizer.get_feature_names_out().tolist()
-    except Exception as e:
-        keywords = ["غير متاح"]
-
-    # مؤشرات أسلوبية متقدمة
+    # تحليل النص
+    stats = feature_extractor.extract(text)
+    sentiment, confidence, emotions = sentiment_analyzer.analyze(text)
     ttr, hapax, lex = feature_extractor.advanced_stylometry(text)
+    keywords = extract_keywords(text)
+    morphology = linguistic_analyzer.analyze_morphology(text)
+    syntax = linguistic_analyzer.analyze_syntax(text)
+    phonetics = linguistic_analyzer.analyze_phonetics(text)
 
-    # تسجيل في CSV
-    log_to_csv(text, sentiment, stats)
+    # إنشاء الصور
+    plot_id = str(uuid.uuid4())
+    dark_mode = data.get('dark_mode', True)
+    local_files = []
 
-    # تجهيز مسارات الصور (نسبية للمسار الثابت)
-    base_url = '/static/images/'
-    response = {
-        'success': True,
-        'from_cache': from_cache,
+    radar_file = os.path.join(app.config['UPLOAD_FOLDER'], f'radar_{plot_id}.png')
+    if create_radar_chart(stats, radar_file, dark_mode):
+        local_files.append(radar_file)
+
+    bar_file = os.path.join(app.config['UPLOAD_FOLDER'], f'bar_{plot_id}.png')
+    if create_bar_chart(text, bar_file, dark_mode):
+        local_files.append(bar_file)
+
+    wc_file = os.path.join(app.config['UPLOAD_FOLDER'], f'wc_{plot_id}.png')
+    if create_wordcloud(text, wc_file, dark_mode):
+        local_files.append(wc_file)
+
+    # رفع الصور إلى S3 إذا كان مفعلاً
+    plot_urls = {}
+    if app.config['USE_S3'] and S3_AVAILABLE:
+        for f in local_files:
+            base = os.path.basename(f)
+            url = upload_to_s3(f, base)
+            if url:
+                if 'radar' in base:
+                    plot_urls['radar'] = url
+                elif 'bar' in base:
+                    plot_urls['bar'] = url
+                elif 'wc' in base:
+                    plot_urls['wordcloud'] = url
+    else:
+        # استخدام المسار المحلي
+        base_url = '/static/images/'
+        plot_urls = {
+            'radar': base_url + f'radar_{plot_id}.png' if os.path.exists(radar_file) else None,
+            'bar': base_url + f'bar_{plot_id}.png' if os.path.exists(bar_file) else None,
+            'wordcloud': base_url + f'wc_{plot_id}.png' if os.path.exists(wc_file) else None
+        }
+
+    # إعداد البيانات للتخزين في قاعدة البيانات
+    analysis_data = {
         'text_preview': text[:200] + '...' if len(text) > 200 else text,
+        'text_hash': hashlib.sha256(text.encode('utf-8')).hexdigest(),
         'sentiment': sentiment,
         'confidence': confidence,
         'emotions': emotions,
@@ -511,28 +778,57 @@ def analyze():
             'punct_ratio': round(stats[6], 1),
             'richness': round(stats[7], 1)
         },
-        'advanced': {
+        'advanced_stats': {
             'ttr': round(ttr*100, 1),
             'hapax': round(hapax*100, 1),
             'lexical_density': round(lex*100, 1)
         },
-        'keywords': keywords[:5],
-        'plots': {
-            'radar': base_url + f'radar_{plot_id}.png' if radar_ok else None,
-            'bar': base_url + f'bar_{plot_id}.png' if bar_ok else None,
-            'wordcloud': base_url + f'wc_{plot_id}.png' if wc_ok else None
-        }
+        'linguistic_features': {
+            'morphology': morphology,
+            'syntax': syntax,
+            'phonetics': phonetics
+        },
+        'keywords': keywords,
+        'plot_urls': plot_urls
     }
-    return jsonify(response)
 
-@app.route('/compare', methods=['POST'])
-def compare():
-    """مقارنة بين نصين"""
+    # حفظ في قاعدة البيانات (غير متزامن - يمكن تحسينه باستخدام Celery)
+    try:
+        analysis = Analysis(
+            id=str(uuid.uuid4()),
+            text_preview=analysis_data['text_preview'],
+            text_hash=analysis_data['text_hash'],
+            sentiment=sentiment,
+            confidence=confidence,
+            emotions=emotions,
+            stats=analysis_data['stats'],
+            advanced_stats=analysis_data['advanced_stats'],
+            linguistic_features=analysis_data['linguistic_features'],
+            keywords=keywords,
+            plot_urls=plot_urls
+        )
+        db.session.add(analysis)
+        db.session.commit()
+    except Exception as e:
+        logging.error(f"فشل حفظ التحليل في قاعدة البيانات: {e}")
+        db.session.rollback()
+
+    # تخزين في الكاش
+    analysis_cache.set(text, analysis_data, timeout=300)
+
+    return jsonify({'success': True, 'from_cache': False, 'data': analysis_data})
+
+@app.route('/api/compare', methods=['POST'])
+@limiter.limit("10 per minute")
+def api_compare():
     data = request.get_json()
     text1 = data.get('text1', '').strip()
     text2 = data.get('text2', '').strip()
     if not text1 or not text2:
         return jsonify({'error': 'الرجاء إدخال كلا النصين'}), 400
+
+    if not SKLEARN_AVAILABLE or cosine_similarity is None:
+        return jsonify({'error': 'مكتبة sklearn غير متاحة للمقارنة'}), 503
 
     try:
         vectorizer = TfidfVectorizer()
@@ -555,40 +851,102 @@ def compare():
         }
         return jsonify(result)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logging.error(f"خطأ في المقارنة: {e}")
+        return jsonify({'error': 'حدث خطأ داخلي'}), 500
 
-@app.route('/history', methods=['GET'])
-def history():
-    """إرجاع آخر عمليات التحليل من CSV"""
-    records = read_history(50)
-    # تنسيق للعرض
+@app.route('/api/history', methods=['GET'])
+@token_required
+def api_history(user):
+    """إرجاع آخر تحليلات المستخدم (مع مصادقة)"""
+    analyses = user.analyses.order_by(Analysis.created_at.desc()).limit(50).all()
     history_list = []
-    for row in records:
-        if len(row) >= 4:
-            history_list.append({
-                'text': row[0],
-                'sentiment': row[1],
-                'entropy': row[2],
-                'time': row[3]
-            })
+    for a in analyses:
+        history_list.append({
+            'id': a.id,
+            'text_preview': a.text_preview,
+            'sentiment': a.sentiment,
+            'stats': a.stats,
+            'created_at': a.created_at.isoformat(),
+            'plot_urls': a.plot_urls
+        })
     return jsonify(history_list)
 
-@app.route('/cleanup_images', methods=['POST'])
-def cleanup_images():
-    """حذف الصور القديمة (يمكن استدعاؤها من الواجهة أو بشكل دوري)"""
-    # حذف الصور الأقدم من ساعة واحدة
-    import time
+@app.route('/api/analysis/<analysis_id>', methods=['GET'])
+@token_required
+def api_get_analysis(user, analysis_id):
+    analysis = Analysis.query.filter_by(id=analysis_id, user_id=user.id).first()
+    if not analysis:
+        return jsonify({'error': 'التحليل غير موجود'}), 404
+    return jsonify({
+        'id': analysis.id,
+        'text_preview': analysis.text_preview,
+        'sentiment': analysis.sentiment,
+        'stats': analysis.stats,
+        'advanced_stats': analysis.advanced_stats,
+        'linguistic_features': analysis.linguistic_features,
+        'keywords': analysis.keywords,
+        'plot_urls': analysis.plot_urls,
+        'created_at': analysis.created_at.isoformat()
+    })
+
+@app.route('/api/cleanup', methods=['POST'])
+def api_cleanup():
+    """حذف الصور المحلية القديمة"""
     now = time.time()
     deleted = 0
-    for fname in os.listdir(STATIC_IMAGES_DIR):
+    folder = app.config['UPLOAD_FOLDER']
+    for fname in os.listdir(folder):
         if fname.startswith(('radar_', 'bar_', 'wc_')) and fname.endswith('.png'):
-            path = os.path.join(STATIC_IMAGES_DIR, fname)
-            if now - os.path.getmtime(path) > 3600:  # أقدم من ساعة
-                os.remove(path)
-                deleted += 1
+            path = os.path.join(folder, fname)
+            if now - os.path.getmtime(path) > 3600:
+                try:
+                    os.remove(path)
+                    deleted += 1
+                except Exception as e:
+                    logging.error(f"فشل حذف {fname}: {e}")
     return jsonify({'deleted': deleted})
 
-# ---------------------------- تشغيل التطبيق ----------------------------
+@app.route('/api/health', methods=['GET'])
+def api_health():
+    return jsonify({'status': 'healthy', 'timestamp': datetime.utcnow().isoformat()})
+
+# نقطة نهاية للتسجيل (اختياري)
+@app.route('/api/register', methods=['POST'])
+def api_register():
+    data = request.get_json()
+    username = data.get('username')
+    email = data.get('email')
+    password = data.get('password')
+    if not username or not email or not password:
+        return jsonify({'error': 'جميع الحقول مطلوبة'}), 400
+    if User.query.filter_by(username=username).first():
+        return jsonify({'error': 'اسم المستخدم موجود بالفعل'}), 400
+    if User.query.filter_by(email=email).first():
+        return jsonify({'error': 'البريد الإلكتروني موجود بالفعل'}), 400
+    user = User(username=username, email=email)
+    user.set_password(password)
+    db.session.add(user)
+    db.session.commit()
+    token = user.generate_token()
+    return jsonify({'token': token, 'user': {'id': user.id, 'username': user.username, 'email': user.email}})
+
+@app.route('/api/login', methods=['POST'])
+def api_login():
+    data = request.get_json()
+    username = data.get('username')
+    password = data.get('password')
+    user = User.query.filter_by(username=username).first()
+    if not user or not user.check_password(password):
+        return jsonify({'error': 'اسم المستخدم أو كلمة المرور غير صحيحة'}), 401
+    token = user.generate_token()
+    return jsonify({'token': token, 'user': {'id': user.id, 'username': user.username, 'email': user.email}})
+
+# ====================== إنشاء قاعدة البيانات ======================
+@app.cli.command("init-db")
+def init_db():
+    db.create_all()
+    print("✅ قاعدة البيانات مهيأة")
+
+# ====================== تشغيل التطبيق ======================
 if __name__ == '__main__':
-    # تشغيل الخادم محلياً (يمكن تغيير host إلى '0.0.0.0' للوصول من الشبكة المحلية)
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=app.config.get('DEBUG', False))
