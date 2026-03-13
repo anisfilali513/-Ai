@@ -1,5 +1,0 @@
-SECRET_KEY=your-secret-key
-DATABASE_URL=postgresql://user:pass@localhost/anis_radar
-REDIS_URL=redis://localhost:6379/0
-FONT_PATH=Amiri-Regular.ttf
-USE_S3=False
