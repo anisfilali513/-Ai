@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>رادار أنيس اللغوي | Anis Linguistic Radar</title>
+
+    <!-- Bootstrap RTL -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.rtl.min.css" rel="stylesheet">
+
+    <style>
+        body {
+            background-color: #0B0F19;
+            color: #F7FAFC;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        .navbar {
+            background-color: #1a1f2e;
+            border-bottom: 2px solid #D4AF37;
+        }
+
+        .text-gold {
+            color: #D4AF37 !important;
+        }
+
+        .card {
+            background-color: #1a1f2e;
+            border: 1px solid #2d3748;
+            color: white;
+            border-radius: 15px;
+        }
+
+        .btn-gold {
+            background-color: #D4AF37;
+            color: #1a1f2e;
+            font-weight: bold;
+            border-radius: 25px;
+            border: none;
+            transition: 0.3s;
+        }
+
+        .btn-gold:hover {
+            background-color: #B8962E;
+            transform: scale(1.02);
+            color: #000;
+        }
+
+        .stats-box {
+            border-right: 3px solid #D4AF37;
+            padding-right: 15px;
+            margin-bottom: 20px;
+        }
+
+        .chart-container {
+            background: #111520;
+            padding: 15px;
+            border-radius: 10px;
+            border: 1px dashed #4FD1C5;
+        }
+
+        .chart-img {
+            width: 100%;
+            border-radius: 8px;
+        }
+
+        textarea {
+            background-color: #2d3748 !important;
+            color: white !important;
+            border: 1px solid #4FD1C5 !important;
+            border-radius: 10px;
+            resize: none;
+        }
+
+        textarea::placeholder {
+            color: #a0aec0;
+        }
+    </style>
+</head>
+
+<body>
+
+<!-- Navbar -->
+<nav class="navbar navbar-dark mb-4">
+    <div class="container">
+        <span class="navbar-brand mb-0 h1 text-gold">
+            📡 رادار أنيس اللغوي 
+            <small style="font-size: 0.6em;">الأكاديمي V1.0</small>
+        </span>
+    </div>
+</nav>
+
+<div class="container">
+    <div class="row">
+
+        <!-- Input -->
+        <div class="col-lg-5 col-md-12">
+            <div class="card p-4 shadow mb-4">
+                <h5 class="mb-3 text-gold">المختبر اللساني</h5>
+
+                <p class="small text-muted">
+                    أدخل النص المراد تحليله:
+                </p>
+
+                <textarea 
+                    id="textInput"
+                    class="form-control"
+                    rows="12"
+                    placeholder="اكتب هنا النص الأدبي أو العلمي..."
+                ></textarea>
+
+                <button 
+                    onclick="analyzeText()" 
+                    class="btn btn-gold w-100 mt-4 py-2"
+                >
+                    تشغيل الرادار الذكي
+                </button>
+
+                <!-- Loading -->
+                <div id="loading" class="text-center mt-3 d-none">
+                    <div class="spinner-border text-warning"></div>
+                    <p class="mt-2 text-info">جاري التحليل...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Results -->
+        <div class="col-lg-7 col-md-12">
+            <div id="resultsArea" class="d-none">
+                <div class="card p-4 shadow">
+
+                    <h5 class="text-gold mb-4 text-center">
+                        نتائج التحليل
+                    </h5>
+
+                    <!-- Stats -->
+                    <div class="row text-center" id="statsGrid"></div>
+
+                    <hr style="border-color: #2d3748;">
+
+                    <!-- Chart -->
+                    <div class="chart-container">
+                        <h6 class="text-center text-info mb-3">
+                            بصمة النص (Radar)
+                        </h6>
+
+                        <img 
+                            id="radarChart"
+                            class="chart-img"
+                            src=""
+                            alt="Radar Chart"
+                        >
+                    </div>
+
+                </div>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<!-- Footer -->
+<footer class="mt-5 mb-4 text-center text-muted small">
+    جميع الحقوق محفوظة © 2026 - د. أنيس فيلالي
+</footer>
+
+<script>
+async function analyzeText() {
+    const text = document.getElementById('textInput').value.trim();
+
+    if (!text) {
+        alert("يرجى إدخال نص للتحليل.");
+        return;
+    }
+
+    const loading = document.getElementById('loading');
+    const results = document.getElementById('resultsArea');
+
+    loading.classList.remove('d-none');
+    results.classList.add('d-none');
+
+    try {
+        const response = await fetch('/api/analyze', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ text })
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+            displayData(data.data);
+        } else {
+            alert(data.error);
+        }
+
+    } catch (error) {
+        alert("فشل الاتصال بالسيرفر.");
+        console.error(error);
+    } finally {
+        loading.classList.add('d-none');
+    }
+}
+
+function displayData(data) {
+    document.getElementById('resultsArea').classList.remove('d-none');
+
+    document.getElementById('radarChart').src =
+        data.plot_urls.radar + "?t=" + new Date().getTime();
+
+    const s = data.stats;
+
+    document.getElementById('statsGrid').innerHTML = `
+        <div class="col-6 stats-box">
+            <small>Entropy</small>
+            <div class="h3 text-gold">${s.entropy}</div>
+        </div>
+
+        <div class="col-6 stats-box">
+            <small>Richness</small>
+            <div class="h3 text-gold">${s.richness}%</div>
+        </div>
+
+        <div class="col-6 stats-box">
+            <small>Balance</small>
+            <div class="h3 text-gold">${s.balance}%</div>
+        </div>
+
+        <div class="col-6 stats-box">
+            <small>Avg Word</small>
+            <div class="h3 text-gold">${s.avg_word}</div>
+        </div>
+    `;
+}
+</script>
+
+</body>
+</html>
